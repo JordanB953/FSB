@@ -157,80 +157,102 @@ export default function StartPage() {
   }
 
   const handleNext = async () => {
+    console.log('Starting database insertion process');
     if (!isFormValid()) return
     setIsUploading(true)
   
     try {
-      const { data: { user } } = await supabase.auth.getUser()
+        const { data: { user } } = await supabase.auth.getUser()
+        console.log('Current user:', user)
+        if (!user) throw new Error('No authenticated user')
 
-      console.log('Current user:', user)
-
-      if (!user) throw new Error('No authenticated user')
-  
-      for (const account of accounts) {
-        if (account.statements.length > 0) {
-          for (const file of account.statements) {
-            const fileExt = file.name.split('.').pop() || 'pdf'
-            const fileName = `${companyInfo.name}-account-${account.lastFourDigits}-${Date.now()}.${fileExt}`
-            const filePath = `${user.id}/${companyInfo.name}/${fileName}`
-            
-            logUploadAttempt(filePath, user.id)
-            
-            const { error: uploadError } = await supabase.storage
-              .from(USER_BUCKET)
-              .upload(filePath, file, {
-                cacheControl: '3600',
-                upsert: false
-              })
-            
-            if (uploadError) {
-              console.error('Storage upload error details:', {
-                error: uploadError,
-                filePath,
-                fileName,
-                fileSize: file.size
-              })
-              throw new Error(`Upload error: ${uploadError.message}`)
+        // First handle file uploads (your existing code)
+        for (const account of accounts) {
+            if (account.statements.length > 0) {
+                for (const file of account.statements) {
+                    const fileExt = file.name.split('.').pop() || 'pdf'
+                    const fileName = `${companyInfo.name}-account-${account.lastFourDigits}-${Date.now()}.${fileExt}`
+                    const filePath = `${user.id}/${companyInfo.name}/${fileName}`
+                    
+                    logUploadAttempt(filePath, user.id)
+                    
+                    const { error: uploadError } = await supabase.storage
+                        .from(USER_BUCKET)
+                        .upload(filePath, file, {
+                            cacheControl: '3600',
+                            upsert: false
+                        })
+                    
+                    if (uploadError) {
+                        console.error('Storage upload error details:', {
+                            error: uploadError,
+                            filePath,
+                            fileName,
+                            fileSize: file.size
+                        })
+                        throw new Error(`Upload error: ${uploadError.message}`)
+                    }
+                }
             }
-          }
         }
-      }
   
-      console.log('Attempting database insertion:', {
-        companyName: companyInfo.name,
-        accountsCount: accounts.filter(a => a.statements.length > 0).length,
-        userId: user.id
-      })
-  
-      const { error: dbError } = await supabase
-        .from('companies')
-        .insert({
-          name: companyInfo.name,
-          industry: companyInfo.industry,
-          description: companyInfo.description,
-          accounts: accounts.filter(a => a.statements.length > 0).map(a => ({
-            lastFourDigits: a.lastFourDigits,
-            statementCount: a.statements.length
-          }))
-        })
-  
-      if (dbError) {
-        console.error('Database insertion error:', dbError)
-        throw new Error(`Database error: ${dbError.message}`)
-      }
-  
-      router.push('/categorization')
+        // Insert company record and get its ID
+        const { data: companyData, error: companyError } = await supabase
+            .from('companies')
+            .insert({
+                name: companyInfo.name,
+                industry: companyInfo.industry,
+                description: companyInfo.description,
+                accounts: accounts.filter(a => a.statements.length > 0).map(a => ({
+                    lastFourDigits: a.lastFourDigits,
+                    statementCount: a.statements.length
+                })),
+                user_id: user.id
+            })
+            .select()  // Add this to get the inserted company's ID
+
+        if (companyError) {
+            console.error('Company insertion error:', companyError)
+            throw new Error(`Database error: ${companyError.message}`)
+        }
+
+        // Now insert bank_statements records
+        const bankStatementsToInsert = accounts
+            .filter(account => account.statements.length > 0)
+            .flatMap(account => 
+                account.statements.map(file => ({
+                    company_id: companyData[0].id,
+                    user_id: user.id,
+                    file_path: `${user.id}/${companyInfo.name}/${file.name}`,
+                    last_four_digits: account.lastFourDigits,
+                    uploaded_at: new Date().toISOString(),
+                    status: 'uploaded'
+                }))
+            )
+
+        console.log('Inserting bank statements:', bankStatementsToInsert)
+
+        const { error: statementsError } = await supabase
+            .from('bank_statements')
+            .insert(bankStatementsToInsert)
+
+        if (statementsError) {
+            console.error('Bank statements insertion error:', statementsError)
+            throw new Error(`Failed to create bank statement records: ${statementsError.message}`)
+        }
+
+        router.push('/categorization')
     } catch (error) {
-      if (error instanceof Error) {
-        alert(`Error: ${error.message}`)
-      } else {
-        alert('An unknown error occurred')
-      }
-      console.error('Error:', error)
+        if (error instanceof Error) {
+            alert(`Error: ${error.message}`)
+        } else {
+            alert('An unknown error occurred')
+        }
+        console.error('Error:', error)
     } finally {
-      setIsUploading(false)
+        setIsUploading(false)
     }
-  }
+}
 
   return (
     <div className="min-h-screen">
